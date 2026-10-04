@@ -1,12 +1,14 @@
 # cache-timer
 
-How long until Claude Code's prompt cache goes cold, in one line above your prompt.
+How long until Claude Code's prompt cache goes cold, on the right side of the prompt footer.
 
 ```
 cache ━━━━━━━━━━ 47 min · 98%
 ```
 
-The bar shrinks as the cache ages. The percent is the share of the last request the cache served. With plenty of time left the line is light olive. It turns khaki at 10 minutes left, amber at 5 and terracotta at 2. Once the cache expires the line goes grey and says how many tokens the next turn will write again, with `/compact first` from 100k tokens up.
+The bar shrinks as the cache ages. The percent is the share of the last request the cache served. With plenty of time left the line is light olive. It turns khaki at 10 minutes left, amber at 5 and terracotta at 2. Once the cache expires the line goes grey and says how many tokens the next turn will write again, with `/compact` from 100k tokens up.
+
+It sits in the footer slot where Claude Code puts its mode labels (`focus`, `memory paused`), and those labels stay first, drawn as before. The same mod works in the terminal and in the desktop app.
 
 This is a Claude Code mod: hooks that run inside Claude Code itself. A one-second clock redraws the line, so the countdown moves while you're idle. It only repaints when the text or colour changes, which is once a minute until the last 5 minutes.
 
@@ -54,7 +56,7 @@ Set them in `~/.claude/settings.json`:
 
 ## What it touches
 
-Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache) and `ui.render` on `AbovePrompt`. It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
+Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache) and `ui.render` on `SessionMode`. It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
 
 ## Tests
 
@@ -62,10 +64,10 @@ Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, sub
 claude plugin test .
 ```
 
-12 tests: colour stages for both lifetimes, time format, lifetime rules, and the line itself on the terminal and desktop surfaces.
+13 tests: colour stages for both lifetimes, time format, lifetime rules, and the footer itself on the terminal and desktop surfaces.
 
 ## Credits
 
-The lifetime rules and the timing check are adapted from [prompt-cache-control](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control) in claude-code-templates by Daniel Ávila (MIT). This mod keeps only the countdown and redraws it as a single line.
+The lifetime rules and the timing check are adapted from [prompt-cache-control](https://github.com/davila7/claude-code-templates/tree/main/cli-tool/components/mods/observability/prompt-cache-control) in claude-code-templates by Daniel Ávila (MIT). This mod keeps only the countdown and draws it in the footer.
 
 MIT, see [LICENSE](LICENSE). Made by Aleksandr_NFA (Telegram) · [Sanexxxx777](https://github.com/Sanexxxx777) (GitHub).

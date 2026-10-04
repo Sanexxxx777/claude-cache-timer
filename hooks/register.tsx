@@ -1,5 +1,6 @@
 /**
- * cache-timer: one quiet line above the prompt.
+ * cache-timer: a cache countdown in the prompt footer, right side, beside the
+ * engine's mode labels (terminal and desktop).
  *
  *   кэш ━━━━━━━━━━ 47 мин · 98%
  *
@@ -10,7 +11,9 @@
  *   - turn.step: each main-loop request's usage (subagents have their own cache)
  *   - clock.every(1000): redraws only when the line changes, so from 5 minutes
  *     up it redraws once a minute
- *   - ui.render on AbovePrompt: the band; nothing before the first request
+ *   - ui.render on SessionMode: the footer's right side; the engine's own mode
+ *     labels stay first, dim, joined by ' & ' as it draws them; nothing of ours
+ *     before the first request
  *
  * Adapted from prompt-cache-control by claude-code-templates (MIT).
  */
@@ -158,19 +161,20 @@ export const register: Register = (on, options) => {
     return r
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const v = view(Date.now())
     if (!v) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const w = WORDS[lang]
+    const modes = e.props.modes
+    const engineModes = modes.length > 0 ? <Text dimColor>{`${modes.join(' & ')} ·`}</Text> : null
 
     if (v.stage === 'cold') {
       const tail = v.size >= COMPACT_AT ? ` · ${w.compact}` : ''
       return (
         <Box flexDirection="row" columnGap={1}>
-          <Text dimColor>{`${w.cache} ${w.cold}`}</Text>
-          <Text dimColor wrap="truncate-end">{`· ${w.rewrite(fmtTokens(v.size))}${tail}`}</Text>
+          {engineModes}
+          <Text dimColor wrap="truncate-end">{`${w.cache} ${w.cold} · ${w.rewrite(fmtTokens(v.size))}${tail}`}</Text>
         </Box>
       )
     }
@@ -181,6 +185,7 @@ export const register: Register = (on, options) => {
     const filled = filledCells(v.left, ttl, width)
     return (
       <Box flexDirection="row" columnGap={1}>
+        {engineModes}
         <Text color={color}>{w.cache}</Text>
         <Box key="bar" flexDirection="row">
           {filled > 0 ? <Text color={color}>{'━'.repeat(filled)}</Text> : null}

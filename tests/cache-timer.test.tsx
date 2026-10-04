@@ -74,7 +74,7 @@ describe('lifetime', () => {
   })
 })
 
-// The module end to end: a main-loop request draws the band, a subagent's does not.
+// The module end to end: a main-loop request draws the footer timer, a subagent's does not.
 function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string; percentUsed: number }[]) {
   on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: limits } }) as never)
   on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
@@ -111,17 +111,17 @@ async function step($: Engine, over: { agentId?: string } = {}) {
 
 const SUBSCRIPTION = [{ kind: 'five_hour', percentUsed: 12 }]
 
-describe('the band', () => {
+describe('the footer', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`${surface}: nothing before the first request, then an olive hour`, { options: { lang: 'ru' } }, async ($, on) => {
       fakeEngine(on, {}, SUBSCRIPTION)
       await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
-      const empty = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'AbovePrompt', props: { hasSurvey: false } as never })
+      const empty = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'SessionMode', props: { modes: [] } as never })
       expect(await empty.findAll({ type: 'Text' })).toEqual([])
       await empty.unmount()
 
       await step($)
-      const ui = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'AbovePrompt', props: { hasSurvey: false } as never })
+      const ui = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'SessionMode', props: { modes: [] } as never })
       const label = await ui.find({ type: 'Text', text: 'кэш' })
       expect(label?.props.color).toBe('#A4AE6B')
       expect((await ui.find({ type: 'Text', text: /^(60|59) мин$/ }))?.props.color).toBe('#A4AE6B')
@@ -134,18 +134,30 @@ describe('the band', () => {
     fakeEngine(on, { LANG: 'en_US.UTF-8' }, [])
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await step($)
-    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: [] } as never })
     expect(await ui.find({ type: 'Text', text: 'cache' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^(5 min|4:5\d)$/ })).toBeDefined()
     await ui.unmount()
   })
 
-  test('a subagent request leaves the band empty', async ($, on) => {
+  test('a subagent request leaves the footer to the engine', async ($, on) => {
     fakeEngine(on, {}, SUBSCRIPTION)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await step($, { agentId: 'agent-1' })
-    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: [] } as never })
     expect(await ui.findAll({ type: 'Text' })).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the engine mode labels stay first, dim', async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: ['focus', 'memory paused'] } as never })
+    const texts = await ui.findAll({ type: 'Text' })
+    expect(texts[0]?.text).toBe('focus & memory paused ·')
+    expect(texts[0]?.props.dimColor).toBe(true)
+    expect(texts[1]?.text).toBe('cache')
     await ui.unmount()
   })
 })
