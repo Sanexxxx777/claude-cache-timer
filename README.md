@@ -1,14 +1,17 @@
 # cache-timer
 
-How long until Claude Code's prompt cache goes cold, on the right side of the prompt footer.
+How long until Claude Code's prompt cache goes cold, in the prompt footer of the terminal and the desktop app.
 
 ```
 cache ━━━━━━━━━━ 47 min · 98%
 ```
 
-The bar shrinks as the cache ages. The percent is the share of the last request the cache served. With plenty of time left the line is light olive. It turns khaki at 10 minutes left, amber at 5 and terracotta at 2. Once the cache expires the line goes grey and says how many tokens the next turn will write again, with `/compact` from 100k tokens up.
+The bar shrinks as the cache ages. The percent is the share of the last request the cache served. With plenty of time left the line is light olive. It turns khaki at 10 minutes left, amber at 5 and terracotta at 2. Once the cache expires the bar empties, the line goes grey and says how many tokens the next turn will write again, with `/compact` from 100k tokens up.
 
-It sits in the footer slot where Claude Code puts its mode labels (`focus`, `memory paused`), and those labels stay first, drawn as before. The same mod works in the terminal and in the desktop app.
+Where it sits:
+
+- **Terminal:** on the row right under Claude Code's hint line (`auto mode on (shift+tab to cycle)`), which stays as Claude Code draws it. On a narrow window the percent goes first, then bar cells.
+- **Desktop app:** under the prompt box, left of the model picker, with a shorter bar (5 cells) because the app draws `━` wider than a letter. The desktop has no hint line to sit beside.
 
 This is a Claude Code mod: hooks that run inside Claude Code itself. A one-second clock redraws the line, so the countdown moves while you're idle. It only repaints when the text or colour changes, which is once a minute until the last 5 minutes.
 
@@ -56,7 +59,7 @@ Set them in `~/.claude/settings.json`:
 
 ## What it touches
 
-Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache) and `ui.render` on `SessionMode`. It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
+Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache) and `ui.render` on `PromptHint` (terminal) and `SessionMode` (desktop). It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
 
 ## Tests
 
@@ -64,7 +67,7 @@ Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, sub
 claude plugin test .
 ```
 
-13 tests: colour stages for both lifetimes, time format, lifetime rules, and the footer itself on the terminal and desktop surfaces.
+16 tests: colour stages for both lifetimes, time format, lifetime rules, how the line fits a narrow terminal, and the line itself on the terminal and desktop surfaces.
 
 ## Credits
 

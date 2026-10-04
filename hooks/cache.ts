@@ -166,3 +166,21 @@ export function fmtTokens(n: number): string {
 /** Filled cells for the part of the lifetime left. */
 export const filledCells = (leftMs: number, ttl: Ttl, width: number) =>
   Math.round(Math.min(1, Math.max(0, leftMs / ttlMs(ttl))) * width)
+
+export type Fit = { bar: number; hit: boolean }
+
+// the dim "· 98%" and the gap before it
+const HIT_COLS = 6
+const MIN_BAR = 4
+
+/**
+ * How the timer fits `free` columns when `fixed` go to its label, time and
+ * gaps: the percent goes first, then bar cells down to MIN_BAR; undefined when
+ * even that does not fit.
+ */
+export function fitBar(free: number, fixed: number, max: number): Fit | undefined {
+  const withHit = Math.min(max, free - fixed - HIT_COLS)
+  if (withHit >= MIN_BAR) return { bar: withHit, hit: true }
+  const bare = Math.min(max, free - fixed)
+  return bare >= MIN_BAR ? { bar: bare, hit: false } : undefined
+}

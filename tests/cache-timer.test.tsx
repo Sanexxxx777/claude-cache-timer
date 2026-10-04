@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { accountOf, decideTtl, fmtLeft, fmtTokens, langOf, observeTtl, STAGE_COLOR, stageOf } from '../hooks/cache.ts'
+import { accountOf, decideTtl, fitBar, fmtLeft, fmtTokens, langOf, observeTtl, STAGE_COLOR, stageOf } from '../hooks/cache.ts'
 import type { Sample } from '../hooks/cache.ts'
 
 const MIN = 60_000
@@ -74,7 +74,7 @@ describe('lifetime', () => {
   })
 })
 
-// The module end to end: a main-loop request draws the footer timer, a subagent's does not.
+// The module end to end: a main-loop request draws the timer, a subagent's does not.
 function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string; percentUsed: number }[]) {
   on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: limits } }) as never)
   on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
@@ -110,50 +110,90 @@ async function step($: Engine, over: { agentId?: string } = {}) {
 }
 
 const SUBSCRIPTION = [{ kind: 'five_hour', percentUsed: 12 }]
+const HINT = { isDraft: false, isWorking: false, hint: '▸▸ auto mode on (shift+tab to cycle) · ← 1 agent' }
 
-describe('the footer', () => {
-  for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: nothing before the first request, then an olive hour`, { options: { lang: 'ru' } }, async ($, on) => {
-      fakeEngine(on, {}, SUBSCRIPTION)
-      await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
-      const empty = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'SessionMode', props: { modes: [] } as never })
-      expect(await empty.findAll({ type: 'Text' })).toEqual([])
-      await empty.unmount()
+describe('fitting the terminal row', () => {
+  test('the percent goes first, then bar cells, then the whole timer', () => {
+    expect(fitBar(60, 10, 10)).toEqual({ bar: 10, hit: true })
+    expect(fitBar(22, 10, 10)).toEqual({ bar: 6, hit: true })
+    expect(fitBar(19, 10, 10)).toEqual({ bar: 9, hit: false })
+    expect(fitBar(14, 10, 10)).toEqual({ bar: 4, hit: false })
+    expect(fitBar(13, 10, 10)).toBe(undefined)
+  })
+})
 
-      await step($)
-      const ui = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'SessionMode', props: { modes: [] } as never })
-      const label = await ui.find({ type: 'Text', text: 'кэш' })
-      expect(label?.props.color).toBe('#A4AE6B')
-      expect((await ui.find({ type: 'Text', text: /^(60|59) мин$/ }))?.props.color).toBe('#A4AE6B')
-      expect(await ui.find({ type: 'Text', text: '· 98%' })).toBeDefined()
-      await ui.unmount()
-    })
-  }
+describe('the terminal: right after the hint line', () => {
+  test('nothing of ours before the first request, then an olive hour after the engine line', { options: { lang: 'ru' } }, async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    const empty = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'PromptHint', props: HINT as never })
+    expect(await empty.findAll({ type: 'Text' })).toEqual([])
+    await empty.unmount()
+
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'PromptHint', props: HINT as never })
+    expect((await ui.find({ type: 'Text', text: 'кэш' }))?.props.color).toBe('#A4AE6B')
+    expect((await ui.find({ type: 'Text', text: '━━━━━━━━━━' }))?.props.color).toBe('#A4AE6B')
+    expect((await ui.find({ type: 'Text', text: /^(60|59) мин$/ }))?.props.color).toBe('#A4AE6B')
+    expect(await ui.find({ type: 'Text', text: '· 98%' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the right-side slot stays the engine\'s on the terminal', async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: [] } as never })
+    expect(await ui.findAll({ type: 'Text' })).toEqual([])
+    await ui.unmount()
+  })
 
   test('an API key (no plan window) counts five minutes, in English by LANG', async ($, on) => {
     fakeEngine(on, { LANG: 'en_US.UTF-8' }, [])
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await step($)
-    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: [] } as never })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'PromptHint', props: HINT as never })
     expect(await ui.find({ type: 'Text', text: 'cache' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^(5 min|4:5\d)$/ })).toBeDefined()
     await ui.unmount()
   })
 
-  test('a subagent request leaves the footer to the engine', async ($, on) => {
+  test('a subagent request leaves the line to the engine', async ($, on) => {
     fakeEngine(on, {}, SUBSCRIPTION)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
     await step($, { agentId: 'agent-1' })
-    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: [] } as never })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'PromptHint', props: HINT as never })
+    expect(await ui.findAll({ type: 'Text' })).toEqual([])
+    await ui.unmount()
+  })
+})
+
+describe('the desktop: a short bar so the time stays whole', () => {
+  test('SessionMode: five cells, time and percent', { options: { lang: 'ru' } }, async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'desktop', component: 'SessionMode', props: { modes: [] } as never })
+    expect((await ui.find({ type: 'Text', text: '━━━━━' }))?.props.color).toBe('#A4AE6B')
+    expect(await ui.find({ type: 'Text', text: /^(60|59) мин$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '· 98%' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the hint line stays the engine\'s on the desktop', async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'desktop', component: 'PromptHint', props: HINT as never })
     expect(await ui.findAll({ type: 'Text' })).toEqual([])
     await ui.unmount()
   })
 
   test('the engine mode labels stay first, dim', async ($, on) => {
     fakeEngine(on, {}, SUBSCRIPTION)
-    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
     await step($)
-    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'SessionMode', props: { modes: ['focus', 'memory paused'] } as never })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'desktop', component: 'SessionMode', props: { modes: ['focus', 'memory paused'] } as never })
     const texts = await ui.findAll({ type: 'Text' })
     expect(texts[0]?.text).toBe('focus & memory paused ·')
     expect(texts[0]?.props.dimColor).toBe(true)

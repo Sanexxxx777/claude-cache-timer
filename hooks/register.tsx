@@ -1,6 +1,7 @@
 /**
- * cache-timer: a cache countdown in the prompt footer, right side, beside the
- * engine's mode labels (terminal and desktop).
+ * cache-timer: a cache countdown in the prompt footer, right after the
+ * engine's hint line ("auto mode on ...") on the terminal; on the desktop in
+ * the slot left of the model picker.
  *
  *   кэш ━━━━━━━━━━ 47 мин · 98%
  *
@@ -11,9 +12,9 @@
  *   - turn.step: each main-loop request's usage (subagents have their own cache)
  *   - clock.every(1000): redraws only when the line changes, so from 5 minutes
  *     up it redraws once a minute
- *   - ui.render on SessionMode: the footer's right side; the engine's own mode
- *     labels stay first, dim, joined by ' & ' as it draws them; nothing of ours
- *     before the first request
+ *   - ui.render on PromptHint: the engine's line kept whole, the timer after
+ *     it; on a narrow terminal the percent goes first, then bar cells
+ *   - ui.render on SessionMode (desktop): the engine's mode labels, then ours
  *
  * Adapted from prompt-cache-control by claude-code-templates (MIT).
  */
@@ -22,6 +23,7 @@ import {
   accountOf,
   decideTtl,
   filledCells,
+  fitBar,
   fmtLeft,
   fmtTokens,
   hitRatio,
@@ -34,7 +36,7 @@ import {
   touchedCache,
   WORDS,
 } from './cache.ts'
-import type { CacheEnv, Lang, Sample, Stage, Ttl } from './cache.ts'
+import type { CacheEnv, Fit, Lang, Sample, Stage, Ttl } from './cache.ts'
 
 const BAR = 10
 // an expired cache this big is worth a /compact before the next turn rewrites it
@@ -161,39 +163,77 @@ export const register: Register = (on, options) => {
     return r
   })
 
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+  // Terminal: after the engine's hint line ("auto mode on (shift+tab to
+  // cycle) · ← 1 agent"), kept whole as the engine draws it; the terminal puts
+  // the pair on two rows. The desktop draws no hint line (tried 04.10.2026).
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const v = view(Date.now())
-    if (!v) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    const w = WORDS[lang]
-    const modes = e.props.modes
-    const engineModes = modes.length > 0 ? <Text dimColor>{`${modes.join(' & ')} ·`}</Text> : null
-
-    if (v.stage === 'cold') {
-      const tail = v.size >= COMPACT_AT ? ` · ${w.compact}` : ''
-      return (
-        <Box flexDirection="row" columnGap={1}>
-          {engineModes}
-          <Text dimColor wrap="truncate-end">{`${w.cache} ${w.cold} · ${w.rewrite(fmtTokens(v.size))}${tail}`}</Text>
-        </Box>
-      )
-    }
-
-    const color = STAGE_COLOR[v.stage]
-    const narrow = (e.viewport?.columns ?? 100) < 40
-    const width = narrow ? 6 : BAR
-    const filled = filledCells(v.left, ttl, width)
+    if (!v || e.surface !== 'terminal') return next(e)
+    const fit = fitTerminal(e.viewport?.columns ?? 100, e.props.hint.length, v)
+    if (!fit) return next(e)
+    const engineLine = await next(e)
+    const kit = $.ui.resolve(e)
     return (
-      <Box flexDirection="row" columnGap={1}>
-        {engineModes}
-        <Text color={color}>{w.cache}</Text>
-        <Box key="bar" flexDirection="row">
-          {filled > 0 ? <Text color={color}>{'━'.repeat(filled)}</Text> : null}
-          {filled < width ? <Text dimColor>{'━'.repeat(width - filled)}</Text> : null}
-        </Box>
-        <Text color={color}>{fmtLeft(v.left, lang)}</Text>
-        <Text dimColor>{`· ${v.hit}%`}</Text>
-      </Box>
+      <kit.Box flexDirection="row" columnGap={2}>
+        {engineLine}
+        {drawTimer(kit, v, fit)}
+      </kit.Box>
     )
   })
+
+  // Desktop only: the slot left of the model picker, the engine's mode labels first.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const v = view(Date.now())
+    if (!v || e.surface !== 'desktop') return next(e)
+    const kit = $.ui.resolve(e)
+    const modes = e.props.modes
+    return (
+      <kit.Box flexDirection="row" columnGap={1}>
+        {modes.length > 0 ? <kit.Text dimColor>{`${modes.join(' & ')} ·`}</kit.Text> : null}
+        {drawTimer(kit, v, DESKTOP_FIT)}
+      </kit.Box>
+    )
+  })
+}
+
+type View = NonNullable<ReturnType<typeof view>>
+type Kit = ReturnType<EngineInterface['ui']['resolve']>
+
+// the desktop draws ━ about twice as wide as a letter and cuts the slot at
+// about 10 of them plus a word: 5 keep the time and percent whole
+const DESKTOP_FIT: Fit = { bar: 5, hit: true }
+
+// the columns left of the terminal row after the hint line and the gap, and what the timer needs besides its bar
+function fitTerminal(columns: number, hintLen: number, v: View): Fit | undefined {
+  const words = WORDS[lang]
+  const fixed = words.cache.length + 2 + (v.stage === 'cold' ? words.cold.length : fmtLeft(v.left, lang).length)
+  return fitBar(columns - hintLen - 2, fixed, BAR)
+}
+
+/** label, bar, time and percent; once cold an empty dim bar and what the next turn rewrites. */
+function drawTimer({ Box, Text }: Kit, v: View, fit: Fit) {
+  const w = WORDS[lang]
+  if (v.stage === 'cold') {
+    const tail = v.size >= COMPACT_AT ? ` · ${w.compact}` : ''
+    return (
+      <Box flexDirection="row" columnGap={1}>
+        <Text dimColor>{w.cache}</Text>
+        <Text dimColor>{'━'.repeat(fit.bar)}</Text>
+        <Text dimColor wrap="truncate-end">{`${w.cold} · ${w.rewrite(fmtTokens(v.size))}${tail}`}</Text>
+      </Box>
+    )
+  }
+  const color = STAGE_COLOR[v.stage]
+  const filled = filledCells(v.left, ttl, fit.bar)
+  return (
+    <Box flexDirection="row" columnGap={1}>
+      <Text color={color}>{w.cache}</Text>
+      <Box flexDirection="row">
+        {filled > 0 ? <Text color={color}>{'━'.repeat(filled)}</Text> : null}
+        {filled < fit.bar ? <Text dimColor>{'━'.repeat(fit.bar - filled)}</Text> : null}
+      </Box>
+      <Text color={color}>{fmtLeft(v.left, lang)}</Text>
+      {fit.hit ? <Text dimColor>{`· ${v.hit}%`}</Text> : null}
+    </Box>
+  )
 }
