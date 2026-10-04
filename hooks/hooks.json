@@ -1,0 +1,4 @@
+{
+  "description": "cache-timer: turn.step reads each main-loop request's cache usage; a one-second clock redraws the band only when its text or colour changes; ui.render draws the AbovePrompt band",
+  "modules": ["./register.tsx"]
+}

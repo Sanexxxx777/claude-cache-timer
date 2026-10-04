@@ -1,0 +1,151 @@
+import { describe, expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import { accountOf, decideTtl, fmtLeft, fmtTokens, langOf, observeTtl, STAGE_COLOR, stageOf } from '../hooks/cache.ts'
+import type { Sample } from '../hooks/cache.ts'
+
+const MIN = 60_000
+
+describe('stages', () => {
+  test('a 1-hour cache steps at 10, 5 and 2 minutes', () => {
+    expect(stageOf(47 * MIN, '1h')).toBe('calm')
+    expect(stageOf(10 * MIN + 1000, '1h')).toBe('calm')
+    expect(stageOf(10 * MIN, '1h')).toBe('ten')
+    expect(stageOf(5 * MIN, '1h')).toBe('five')
+    expect(stageOf(2 * MIN, '1h')).toBe('two')
+    expect(stageOf(1000, '1h')).toBe('two')
+    expect(stageOf(0, '1h')).toBe('cold')
+  })
+
+  test('a 5-minute cache gets the same fractions: 50, 25 and 10 seconds', () => {
+    expect(stageOf(4 * MIN, '5m')).toBe('calm')
+    expect(stageOf(50_000, '5m')).toBe('ten')
+    expect(stageOf(25_000, '5m')).toBe('five')
+    expect(stageOf(10_000, '5m')).toBe('two')
+  })
+
+  test('calm is light olive and every live stage has its own colour', () => {
+    expect(STAGE_COLOR.calm).toBe('#A4AE6B')
+    expect(new Set(Object.values(STAGE_COLOR)).size).toBe(4)
+  })
+})
+
+describe('formatting', () => {
+  test('whole minutes from 5 minutes up, m:ss below', () => {
+    expect(fmtLeft(60 * MIN, 'ru')).toBe('60 мин')
+    expect(fmtLeft(46 * MIN + 1000, 'ru')).toBe('47 мин')
+    expect(fmtLeft(5 * MIN, 'en')).toBe('5 min')
+    expect(fmtLeft(4 * MIN + 59_000, 'en')).toBe('4:59')
+    expect(fmtLeft(103_000, 'ru')).toBe('1:43')
+    expect(fmtLeft(0, 'ru')).toBe('0:00')
+  })
+
+  test('tokens and language', () => {
+    expect(fmtTokens(300)).toBe('300')
+    expect(fmtTokens(152_400)).toBe('152k')
+    expect(fmtTokens(1_200_000)).toBe('1.2M')
+    expect(langOf('auto', 'ru_RU.UTF-8')).toBe('ru')
+    expect(langOf('auto', 'en_US.UTF-8')).toBe('en')
+    expect(langOf('ru', 'en_US.UTF-8')).toBe('ru')
+  })
+})
+
+describe('lifetime', () => {
+  test('subscription gives an hour, credits and API keys five minutes, env and option win', () => {
+    expect(decideTtl('auto', {}, undefined, 'subscription')).toBe('1h')
+    expect(decideTtl('auto', {}, undefined, 'credits')).toBe('5m')
+    expect(decideTtl('auto', {}, undefined, 'other')).toBe('5m')
+    expect(decideTtl('auto', { force5m: '1' }, undefined, 'subscription')).toBe('5m')
+    expect(decideTtl('auto', { ttlVar: '1h' }, undefined, 'other')).toBe('1h')
+    expect(decideTtl('5m', { enable1h: '1' }, '1h', 'subscription')).toBe('5m')
+  })
+
+  test('a full plan window means usage credits', () => {
+    expect(accountOf([{ kind: 'five_hour', percentUsed: 40 }])).toBe('subscription')
+    expect(accountOf([{ kind: 'seven_day', percentUsed: 100 }])).toBe('credits')
+    expect(accountOf([])).toBe('other')
+  })
+
+  test('a hit 20 minutes later proves the hour; a miss 20 minutes later says five minutes', () => {
+    const a: Sample = { model: 'm', startedAt: 0, read: 0, write: 50_000, fresh: 10 }
+    expect(observeTtl(a, { ...a, startedAt: 20 * MIN, read: 50_000, write: 100 }, undefined)).toBe('1h')
+    expect(observeTtl(a, { ...a, startedAt: 20 * MIN }, undefined)).toBe('5m')
+    expect(observeTtl(a, { ...a, startedAt: 2 * MIN }, undefined)).toBe(undefined)
+  })
+})
+
+// The module end to end: a main-loop request draws the band, a subagent's does not.
+function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string; percentUsed: number }[]) {
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: limits } }) as never)
+  on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
+  on('session.end', async () => ({ sessionId: 's1' }) as never)
+  on('env.get', ($, e) => ({ value: env[e.name] }))
+  on('clock.every', () => ({ value: undefined }) as never)
+  on('ui.invalidate', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  // the engine's own band: nothing
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  on('turn.step', async function* ($, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model: 'claude-opus-5-5', input_tokens: 300, output_tokens: 50, cache_read_input_tokens: 80_000, cache_creation_input_tokens: 1_000 },
+    } as never
+  })
+}
+
+async function step($: Engine, over: { agentId?: string } = {}) {
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3, ...over } as never)
+  for (;;) {
+    const n = await stream.next()
+    if (n.done) return n.value
+  }
+}
+
+const SUBSCRIPTION = [{ kind: 'five_hour', percentUsed: 12 }]
+
+describe('the band', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: nothing before the first request, then an olive hour`, { options: { lang: 'ru' } }, async ($, on) => {
+      fakeEngine(on, {}, SUBSCRIPTION)
+      await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
+      const empty = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'AbovePrompt', props: { hasSurvey: false } as never })
+      expect(await empty.findAll({ type: 'Text' })).toEqual([])
+      await empty.unmount()
+
+      await step($)
+      const ui = await $.ui.mount({ plugin: 'cache-timer', surface, component: 'AbovePrompt', props: { hasSurvey: false } as never })
+      const label = await ui.find({ type: 'Text', text: 'кэш' })
+      expect(label?.props.color).toBe('#A4AE6B')
+      expect((await ui.find({ type: 'Text', text: /^(60|59) мин$/ }))?.props.color).toBe('#A4AE6B')
+      expect(await ui.find({ type: 'Text', text: '· 98%' })).toBeDefined()
+      await ui.unmount()
+    })
+  }
+
+  test('an API key (no plan window) counts five minutes, in English by LANG', async ($, on) => {
+    fakeEngine(on, { LANG: 'en_US.UTF-8' }, [])
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($)
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+    expect(await ui.find({ type: 'Text', text: 'cache' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^(5 min|4:5\d)$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a subagent request leaves the band empty', async ($, on) => {
+    fakeEngine(on, {}, SUBSCRIPTION)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($, { agentId: 'agent-1' })
+    const ui = await $.ui.mount({ plugin: 'cache-timer', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+    expect(await ui.findAll({ type: 'Text' })).toEqual([])
+    await ui.unmount()
+  })
+})
