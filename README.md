@@ -21,9 +21,20 @@ On a Claude subscription Claude Code asks for the 1-hour cache by itself. API ke
 
 On a 5-minute cache the colour steps scale down to 50, 25 and 10 seconds.
 
+## When the cache is rebuilt early
+
+The countdown assumes the next request reads what the last one cached. Some changes break that before the time runs out, and the line says so.
+
+- **Model switch.** Each model has its own cache. Right after `/model` or the desktop picker, before you send anything, the line turns amber: `cache ━━━━━━━━━━ other model · rewrites 81k`. The number is what the other model will write, less anything it still holds from earlier in the conversation. Switch back and the timer returns.
+- **A rebuild the countdown did not predict.** When a request writes again more than 5% and at least 2,000 tokens of what the warm cache held (the rule Claude Code uses for misses in `/usage`), the percent gives way to the cause for the rest of that turn: `· rebuilt: model` when the engine changed the model itself (a fallback, a skill's model), `· rebuilt: effort` when the effort level changed (on most models each level has its own cache), or `· rebuilt` when the cause is out of a mod's sight: fast mode turned on, tools changed, an early eviction. A prompt that shrank (`/compact`, cleared tool results) or went back with `/rewind` does not count.
+- **`/compact`.** The line clears until the next request, because the old size no longer applies.
+- **Usage credits.** When a subscription runs out of plan usage, Claude Code drops to the 5-minute cache. The mod drops an hour it had proven from timing and counts five minutes.
+
+Claude Code works out the likely cause of a miss itself, for `/usage` and status line scripts (`prompt_cache.last_miss_cause`), but it does not pass it to mods, so the mod reads it from the token counts and the events it can see.
+
 ## Install
 
-Tested on Claude Code 2.1.289. Mods are early access, and their `$` API may change between releases.
+Tested on Claude Code 2.1.289 and 2.1.290. Mods are early access, and their `$` API may change between releases.
 
 ```sh
 git clone https://github.com/Sanexxxx777/claude-cache-timer ~/claude-cache-timer
@@ -59,7 +70,7 @@ Set them in `~/.claude/settings.json`:
 
 ## What it touches
 
-Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache) and `ui.render` on `PromptHint` (terminal) and `SessionMode` (desktop). It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
+Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache), `classic.PostModelSwitch` (which model the next request goes to), `classic.PostCompact`, and `ui.render` on `PromptHint` (terminal) and `SessionMode` (desktop). It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
 
 ## Tests
 
@@ -67,7 +78,7 @@ Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, sub
 claude plugin test .
 ```
 
-16 tests: colour stages for both lifetimes, time format, lifetime rules, how the line fits a narrow terminal, and the line itself on the terminal and desktop surfaces.
+28 tests: colour stages for both lifetimes, time format, lifetime rules, when a rebuild counts and what caused it, how the line fits a narrow terminal, and the line itself on the terminal and desktop surfaces, with a model switch, a rebuild and a compaction.
 
 ## Credits
 

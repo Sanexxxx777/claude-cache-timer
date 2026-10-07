@@ -1,7 +1,7 @@
 {
   "name": "cache-timer",
-  "version": "0.3.0",
-  "description": "A countdown in the prompt footer: under the hint line on the terminal, left of the model picker on the desktop: time left on the prompt cache and how much of the last request it served. Olive while there is plenty, warmer at 10, 5 and 2 minutes left (scaled down for a 5-minute cache). The lifetime follows Claude Code's own rules: 1 hour on a subscription, 5 minutes on an API key or usage credits.",
+  "version": "0.4.0",
+  "description": "A countdown in the prompt footer: under the hint line on the terminal, left of the model picker on the desktop: time left on the prompt cache and how much of the last request it served, or, when the cache was written again while it should have been warm, why (a model switch, an effort change); after a model switch, before anything is sent, what the other model will write. Olive while there is plenty, warmer at 10, 5 and 2 minutes left (scaled down for a 5-minute cache). The lifetime follows Claude Code's own rules: 1 hour on a subscription, 5 minutes on an API key or usage credits.",
   "author": {
     "name": "Aleksandr_NFA",
     "url": "https://github.com/Sanexxxx777"

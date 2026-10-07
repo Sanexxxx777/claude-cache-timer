@@ -8,8 +8,14 @@
  * The bar and the time are the cache's life left; the dim percent is how much
  * of the last request the cache served. Light olive while calm, warmer at 10,
  * 5 and 2 minutes left, dimmed once expired with what the next turn will cost.
+ * A rebuild the countdown did not predict puts its cause in the percent's
+ * place (· сброс: модель) for the rest of its turn and until the next one
+ * reads the cache; after a model switch, before anything is sent, the line
+ * says what the other model will write (другая модель · перезапишет 120k).
  *
  *   - turn.step: each main-loop request's usage (subagents have their own cache)
+ *   - classic.PostModelSwitch: the model the next request goes to
+ *   - classic.PostCompact: a new, shorter history, nothing cached for it yet
  *   - clock.every(1000): redraws only when the line changes, so from 5 minutes
  *     up it redraws once a minute
  *   - ui.render on PromptHint: the engine's line kept whole, the timer after
@@ -21,13 +27,16 @@
 import type { EngineInterface, Register } from 'claude-code'
 import {
   accountOf,
+  baseModel,
   decideTtl,
   filledCells,
   fitBar,
   fmtLeft,
   fmtTokens,
   hitRatio,
+  keepObserved,
   langOf,
+  missCause,
   observeTtl,
   promptTokens,
   remainingMs,
@@ -36,24 +45,43 @@ import {
   touchedCache,
   WORDS,
 } from './cache.ts'
-import type { CacheEnv, Fit, Lang, Sample, Stage, Ttl } from './cache.ts'
+import type { Account, CacheEnv, Cause, Fit, Lang, Sample, Stage, Ttl } from './cache.ts'
 
 const BAR = 10
 // an expired cache this big is worth a /compact before the next turn rewrites it
 const COMPACT_AT = 100_000
 // below this a lapsing cache costs too little to interrupt anyone about
 const TOAST_MIN_TOKENS = 20_000
+// a rebuild and a switch's pending rewrite: amber, whatever the time left
+const ALERT = STAGE_COLOR.five
 
 let last: Sample | undefined
 let prev: Sample | undefined
+// each model's own cache: its last main-loop request, by baseModel
+const seen = new Map<string, Sample>()
+// the model a switch named, until a request goes out
+let nextModel: string | undefined
+// a rebuild the countdown did not predict, kept while its turn lasts
+let reset: { cause: Cause; turnId: string } | undefined
 let ttl: Ttl = '5m'
 let observed: Ttl | undefined
+let account: Account | undefined
 let env: CacheEnv = {}
 let setting: unknown
 let lang: Lang = 'en'
 let timer: { cancel: () => void } | undefined
 let lastKey = ''
 let toastedFor = 0
+
+// the conversation starts over (a new session, /clear, a compaction): nothing of it cached yet
+function forget() {
+  last = undefined
+  prev = undefined
+  seen.clear()
+  nextModel = undefined
+  reset = undefined
+  lastKey = ''
+}
 
 // the promptCacheTtl setting: local over project over user settings
 async function readSetting($: EngineInterface): Promise<unknown> {
@@ -74,8 +102,10 @@ async function readSetting($: EngineInterface): Promise<unknown> {
 
 async function refreshTtl($: EngineInterface, option: unknown) {
   // a subscription that runs out of plan usage moves to credits mid-session
-  const account = accountOf((await $.session.usage().catch(() => undefined))?.rateLimits ?? [])
-  const base = decideTtl(option, env, setting, account)
+  const now = accountOf((await $.session.usage().catch(() => undefined))?.rateLimits ?? [])
+  observed = keepObserved(observed, account, now)
+  if (now !== 'other') account = now
+  const base = decideTtl(option, env, setting, now)
   const pinned = option === '5m' || option === '1h'
   ttl = pinned ? base : (observed ?? base)
 }
@@ -84,20 +114,27 @@ function view(now: number) {
   if (!last || !touchedCache(last)) return undefined
   const left = remainingMs(last, ttl, now)
   const stage: Stage = stageOf(left, ttl)
-  return { left, stage, size: promptTokens(last), hit: Math.round(hitRatio(last) * 100) }
+  const size = promptTokens(last)
+  // after a switch the next request reads only what the other model cached itself, if it still holds
+  let rewrite: number | undefined
+  if (nextModel !== undefined && baseModel(nextModel) !== baseModel(last.model) && stage !== 'cold') {
+    const own = seen.get(baseModel(nextModel))
+    rewrite = Math.max(0, size - (own && remainingMs(own, ttl, now) > 0 ? promptTokens(own) : 0))
+  }
+  return { left, stage, size, hit: Math.round(hitRatio(last) * 100), rewrite, reset: reset?.cause }
 }
 
-const keyOf = (v: ReturnType<typeof view>) => (v ? `${v.stage}|${v.stage === 'cold' ? '' : fmtLeft(v.left, lang)}|${v.hit}` : '')
+const keyOf = (v: ReturnType<typeof view>) =>
+  v ? `${v.stage}|${v.stage === 'cold' ? '' : fmtLeft(v.left, lang)}|${v.hit}|${v.rewrite}|${v.reset}` : ''
 
 export const register: Register = (on, options) => {
   const wantToast = options.toast !== false
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    last = undefined
-    prev = undefined
+    forget()
     observed = undefined
-    lastKey = ''
+    account = undefined
     toastedFor = 0
     const none = () => undefined
     env = {
@@ -118,8 +155,8 @@ export const register: Register = (on, options) => {
         lastKey = key
         $.ui.invalidate('ui.render')
       }
-      // one toast per cache entry, on entering the last stage
-      if (wantToast && v && last && v.stage === 'two' && v.size >= TOAST_MIN_TOKENS && toastedFor !== last.startedAt) {
+      // one toast per cache entry, on entering the last stage; after a switch no message refreshes it
+      if (wantToast && v && last && v.stage === 'two' && v.rewrite === undefined && v.size >= TOAST_MIN_TOKENS && toastedFor !== last.startedAt) {
         toastedFor = last.startedAt
         $.ui.toast(WORDS[lang].toast(fmtLeft(v.left, lang), fmtTokens(v.size)))
       }
@@ -130,10 +167,8 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     // /clear starts a new conversation in the same process, and a new cache
     if (e.reason === 'clear') {
-      last = undefined
-      prev = undefined
+      forget()
       observed = undefined
-      lastKey = ''
       $.ui.invalidate('ui.render')
       return next(e)
     }
@@ -149,7 +184,9 @@ export const register: Register = (on, options) => {
     if (r.usage) {
       prev = last
       last = {
-        model: r.usage.model || e.model,
+        // the engine's id, as a model switch names it; the API's only when it gave none
+        model: e.model || r.usage.model,
+        effort: e.effort,
         startedAt,
         read: r.usage.cache_read_input_tokens,
         write: r.usage.cache_creation_input_tokens,
@@ -157,11 +194,32 @@ export const register: Register = (on, options) => {
       }
       observed = observeTtl(prev, last, observed)
       await refreshTtl($, options.ttl)
+      const cause = missCause(prev, last, ttl)
+      if (cause) reset = { cause, turnId: e.turnId }
+      else if (reset?.turnId !== e.turnId) reset = undefined
+      seen.set(baseModel(last.model), last)
+      nextModel = undefined
       lastKey = ''
       $.ui.invalidate('ui.render')
     }
     return r
   })
+
+  // /model, the desktop picker, the SDK: the next request reads only the new model's own cache.
+  // Ours runs before next, and a failure of it passes the event on untouched
+  on('classic.PostModelSwitch', ($, e, next) => {
+    nextModel = e.to_model
+    lastKey = ''
+    $.ui.invalidate('ui.render')
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // the history is now a summary: the next request caches it afresh, by design
+  on('classic.PostCompact', ($, e, next) => {
+    forget()
+    $.ui.invalidate('ui.render')
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // Terminal: after the engine's hint line ("auto mode on (shift+tab to
   // cycle) · ← 1 agent"), kept whole as the engine draws it; the terminal puts
@@ -203,14 +261,23 @@ type Kit = ReturnType<EngineInterface['ui']['resolve']>
 // about 10 of them plus a word: 5 keep the time and percent whole
 const DESKTOP_FIT: Fit = { bar: 5, hit: true }
 
+// after the time: the percent, or a rebuild's cause in its place
+const tailOf = (v: View) => (v.reset ? `· ${WORDS[lang].reset[v.reset]}` : `· ${v.hit}%`)
+
 // the columns left of the terminal row after the hint line and the gap, and what the timer needs besides its bar
 function fitTerminal(columns: number, hintLen: number, v: View): Fit | undefined {
   const words = WORDS[lang]
-  const fixed = words.cache.length + 2 + (v.stage === 'cold' ? words.cold.length : fmtLeft(v.left, lang).length)
-  return fitBar(columns - hintLen - 2, fixed, BAR)
+  const head = v.stage === 'cold' ? words.cold : v.rewrite !== undefined ? words.other : fmtLeft(v.left, lang)
+  // cold and switched lines truncate their own tail; a live one makes room for the percent or the cause
+  const tail = v.stage === 'cold' || v.rewrite !== undefined ? undefined : tailOf(v).length + 1
+  return fitBar(columns - hintLen - 2, words.cache.length + 2 + head.length, BAR, tail)
 }
 
-/** label, bar, time and percent; once cold an empty dim bar and what the next turn rewrites. */
+/**
+ * label, bar, time and percent (or a rebuild's cause); once cold an empty dim
+ * bar and what the next turn rewrites; after a model switch an empty bar and
+ * what the other model will write.
+ */
 function drawTimer({ Box, Text }: Kit, v: View, fit: Fit) {
   const w = WORDS[lang]
   if (v.stage === 'cold') {
@@ -220,6 +287,15 @@ function drawTimer({ Box, Text }: Kit, v: View, fit: Fit) {
         <Text dimColor>{w.cache}</Text>
         <Text dimColor>{'━'.repeat(fit.bar)}</Text>
         <Text dimColor wrap="truncate-end">{`${w.cold} · ${w.rewrite(fmtTokens(v.size))}${tail}`}</Text>
+      </Box>
+    )
+  }
+  if (v.rewrite !== undefined) {
+    return (
+      <Box flexDirection="row" columnGap={1}>
+        <Text color={ALERT}>{w.cache}</Text>
+        <Text dimColor>{'━'.repeat(fit.bar)}</Text>
+        <Text color={ALERT} wrap="truncate-end">{`${w.other} · ${w.rewrite(fmtTokens(v.rewrite))}`}</Text>
       </Box>
     )
   }
@@ -233,7 +309,15 @@ function drawTimer({ Box, Text }: Kit, v: View, fit: Fit) {
         {filled < fit.bar ? <Text dimColor>{'━'.repeat(fit.bar - filled)}</Text> : null}
       </Box>
       <Text color={color}>{fmtLeft(v.left, lang)}</Text>
-      {fit.hit ? <Text dimColor>{`· ${v.hit}%`}</Text> : null}
+      {fit.hit ? (
+        v.reset ? (
+          <Text color={ALERT} wrap="truncate-end">
+            {tailOf(v)}
+          </Text>
+        ) : (
+          <Text dimColor>{tailOf(v)}</Text>
+        )
+      ) : null}
     </Box>
   )
 }

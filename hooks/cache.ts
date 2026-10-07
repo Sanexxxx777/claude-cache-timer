@@ -25,6 +25,8 @@ export type CacheEnv = {
 /** One main-loop request as the API reported it. */
 export type Sample = {
   model: string
+  /** the effort the request asked for; absent on a model without one */
+  effort?: string | number
   /** ms since the epoch when the request started */
   startedAt: number
   read: number
@@ -64,6 +66,13 @@ export function accountOf(windows: readonly { kind: string; percentUsed: number 
   return plan.some(w => w.percentUsed >= 100) ? 'credits' : 'subscription'
 }
 
+/**
+ * What the traffic proved holds for one way of billing: a plan that runs out
+ * onto usage credits (5 minutes) or a new window back onto it starts over.
+ */
+export const keepObserved = (observed: Ttl | undefined, was: Account | undefined, now: Account): Ttl | undefined =>
+  was === undefined || was === 'other' || now === 'other' || was === now ? observed : undefined
+
 export const ttlMs = (ttl: Ttl) => (ttl === '1h' ? 3_600_000 : 300_000)
 export const promptTokens = (s: Sample) => s.read + s.write + s.fresh
 
@@ -101,6 +110,34 @@ export function observeTtl(prev: Sample | undefined, cur: Sample, known: Ttl | u
   return lapsed ? '5m' : known
 }
 
+/** Why a cache that should still have been warm was written again. */
+export type Cause = 'model' | 'effort' | 'other'
+
+// a model id without its context tag (`[1m]`), so the engine's and a hook's spellings compare
+export const baseModel = (m: string) => m.replace(/\[.*\]$/, '').toLowerCase()
+
+/**
+ * A rebuild the countdown did not predict, by the rule Claude Code counts its
+ * /usage misses with: the request wrote again more than 5% and at least 2,000
+ * tokens of what the warm cache held; what it did not read but did not write
+ * either was cut away (/rewind). A prompt that shrank (a compaction, cleared
+ * tool results) rebuilds by design, and a lapsed cache already showed as
+ * cold. Each model has its own cache; so, on most models, does each effort
+ * level (Opus 5.5, Sonnet 5.5 and Fable 5.1 keep theirs). Anything else is a
+ * cause the API does not report: fast mode turned on, tools changed, an early
+ * eviction.
+ */
+export function missCause(prev: Sample | undefined, cur: Sample, ttl: Ttl): Cause | undefined {
+  if (!prev || !touchedCache(prev)) return undefined
+  if (cur.startedAt - prev.startedAt >= ttlMs(ttl) - SLACK_MS) return undefined
+  const held = promptTokens(prev)
+  if (promptTokens(cur) < held * 0.7) return undefined
+  const lost = Math.min(held - cur.read, cur.write + cur.fresh)
+  if (lost <= held * 0.05 || lost < 2_000) return undefined
+  if (baseModel(prev.model) !== baseModel(cur.model)) return 'model'
+  return prev.effort !== cur.effort ? 'effort' : 'other'
+}
+
 /**
  * Colour stage by time left. On a 1-hour cache the steps are 10, 5 and 2
  * minutes; a 5-minute cache gets the same fractions of its life (50, 25, 10 s).
@@ -128,12 +165,26 @@ export const STAGE_COLOR: Record<Exclude<Stage, 'cold'>, string> = {
 
 export type Lang = 'ru' | 'en'
 
-export const WORDS: Record<Lang, { cache: string; min: string; cold: string; rewrite: (t: string) => string; compact: string; toast: (left: string, t: string) => string }> = {
+export const WORDS: Record<
+  Lang,
+  {
+    cache: string
+    min: string
+    cold: string
+    other: string
+    rewrite: (t: string) => string
+    reset: Record<Cause, string>
+    compact: string
+    toast: (left: string, t: string) => string
+  }
+> = {
   ru: {
     cache: 'кэш',
     min: 'мин',
     cold: 'остыл',
+    other: 'другая модель',
     rewrite: t => `перезапишет ${t}`,
+    reset: { model: 'сброс: модель', effort: 'сброс: усилие', other: 'сброс' },
     compact: '/compact',
     toast: (left, t) => `кэш остынет через ${left}: любое сообщение продлит его (${t} токенов)`,
   },
@@ -141,7 +192,9 @@ export const WORDS: Record<Lang, { cache: string; min: string; cold: string; rew
     cache: 'cache',
     min: 'min',
     cold: 'expired',
+    other: 'other model',
     rewrite: t => `rewrites ${t}`,
+    reset: { model: 'rebuilt: model', effort: 'rebuilt: effort', other: 'rebuilt' },
     compact: '/compact',
     toast: (left, t) => `cache expires in ${left}: any message refreshes it (${t} tokens)`,
   },
@@ -175,11 +228,12 @@ const MIN_BAR = 4
 
 /**
  * How the timer fits `free` columns when `fixed` go to its label, time and
- * gaps: the percent goes first, then bar cells down to MIN_BAR; undefined when
- * even that does not fit.
+ * gaps: the tail ("· 98%", or a rebuild's cause, `tail` columns with its gap)
+ * goes first, then bar cells down to MIN_BAR; undefined when even that does
+ * not fit.
  */
-export function fitBar(free: number, fixed: number, max: number): Fit | undefined {
-  const withHit = Math.min(max, free - fixed - HIT_COLS)
+export function fitBar(free: number, fixed: number, max: number, tail = HIT_COLS): Fit | undefined {
+  const withHit = Math.min(max, free - fixed - tail)
   if (withHit >= MIN_BAR) return { bar: withHit, hit: true }
   const bare = Math.min(max, free - fixed)
   return bare >= MIN_BAR ? { bar: bare, hit: false } : undefined
