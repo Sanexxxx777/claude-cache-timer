@@ -12,6 +12,9 @@
  * place (· сброс: модель) for the rest of its turn and until the next one
  * reads the cache; after a model switch, before anything is sent, the line
  * says what the other model will write (другая модель · перезапишет 120k).
+ * In Ghostty a big cache also raises a macOS notification, through
+ * ~/.claude/hooks/cache-notify.sh: 2 minutes before it expires, and on a
+ * rebuild nobody asked for, so a session in a background tab is not missed.
  *
  *   - turn.step: each main-loop request's usage (subagents have their own cache)
  *   - classic.PostModelSwitch: the model the next request goes to
@@ -37,6 +40,8 @@ import {
   keepObserved,
   langOf,
   missCause,
+  notifyMin,
+  notifyRebuild,
   observeTtl,
   promptTokens,
   remainingMs,
@@ -61,6 +66,9 @@ let prev: Sample | undefined
 const seen = new Map<string, Sample>()
 // the model a switch named, until a request goes out
 let nextModel: string | undefined
+// the model the person last switched to, by baseModel: its rebuild was asked for,
+// even when a request already in flight came back on the old one first
+let chosenModel: string | undefined
 // a rebuild the countdown did not predict, kept while its turn lasts
 let reset: { cause: Cause; turnId: string } | undefined
 let ttl: Ttl = '5m'
@@ -72,6 +80,9 @@ let lang: Lang = 'en'
 let timer: { cancel: () => void } | undefined
 let lastKey = ''
 let toastedFor = 0
+let notifiedFor = 0
+// where a notification can go: Ghostty's tab of this session, by the notifier script
+let notifier: { script: string; title: string } | undefined
 
 // the conversation starts over (a new session, /clear, a compaction): nothing of it cached yet
 function forget() {
@@ -81,6 +92,12 @@ function forget() {
   nextModel = undefined
   reset = undefined
   lastKey = ''
+}
+
+// fire and forget: the script finds the session's tab itself and stays silent without one
+function notify($: EngineInterface, body: string) {
+  if (!notifier) return
+  void $.process.run(['bash', notifier.script, notifier.title, body], { timeoutMs: 5000 }).catch(() => undefined)
 }
 
 // the promptCacheTtl setting: local over project over user settings
@@ -129,6 +146,7 @@ const keyOf = (v: ReturnType<typeof view>) =>
 
 export const register: Register = (on, options) => {
   const wantToast = options.toast !== false
+  const minNotify = notifyMin(options.notify)
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -136,6 +154,8 @@ export const register: Register = (on, options) => {
     observed = undefined
     account = undefined
     toastedFor = 0
+    notifiedFor = 0
+    chosenModel = undefined
     const none = () => undefined
     env = {
       enable1h: await $.env.get('ENABLE_PROMPT_CACHING_1H').catch(none),
@@ -144,6 +164,12 @@ export const register: Register = (on, options) => {
     }
     lang = langOf(options.lang, await $.env.get('LANG').catch(none))
     setting = await readSetting($)
+    const home = await $.env.get('HOME').catch(none)
+    const inGhostty = e.surface === 'terminal' && (await $.env.get('TERM_PROGRAM').catch(none)) === 'ghostty'
+    notifier =
+      inGhostty && home && minNotify !== undefined
+        ? { script: `${home}/.claude/hooks/cache-notify.sh`, title: `Claude Code · ${e.cwd.split('/').filter(Boolean).pop() ?? e.cwd}` }
+        : undefined
     await refreshTtl($, options.ttl)
     $.ui.log(`cache-timer loaded: ${ttl} cache, lang ${lang}`, { to: 'debug' })
 
@@ -159,6 +185,11 @@ export const register: Register = (on, options) => {
       if (wantToast && v && last && v.stage === 'two' && v.rewrite === undefined && v.size >= TOAST_MIN_TOKENS && toastedFor !== last.startedAt) {
         toastedFor = last.startedAt
         $.ui.toast(WORDS[lang].toast(fmtLeft(v.left, lang), fmtTokens(v.size)))
+      }
+      // the same moment for a tab out of sight, from the notify option's size up
+      if (notifier && minNotify !== undefined && v && last && v.stage === 'two' && v.rewrite === undefined && v.size >= minNotify && notifiedFor !== last.startedAt) {
+        notifiedFor = last.startedAt
+        notify($, WORDS[lang].toast(fmtLeft(v.left, lang), fmtTokens(v.size)))
       }
     })
     return r
@@ -197,6 +228,11 @@ export const register: Register = (on, options) => {
       const cause = missCause(prev, last, ttl)
       if (cause) reset = { cause, turnId: e.turnId }
       else if (reset?.turnId !== e.turnId) reset = undefined
+      const size = promptTokens(last)
+      const byUser = nextModel !== undefined || baseModel(last.model) === chosenModel
+      if (cause && minNotify !== undefined && size >= minNotify && notifyRebuild(cause, byUser)) {
+        notify($, WORDS[lang].rebuilt(fmtTokens(size), cause))
+      }
       seen.set(baseModel(last.model), last)
       nextModel = undefined
       lastKey = ''
@@ -209,6 +245,7 @@ export const register: Register = (on, options) => {
   // Ours runs before next, and a failure of it passes the event on untouched
   on('classic.PostModelSwitch', ($, e, next) => {
     nextModel = e.to_model
+    chosenModel = baseModel(e.to_model)
     lastKey = ''
     $.ui.invalidate('ui.render')
     return next(e)

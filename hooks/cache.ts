@@ -176,6 +176,7 @@ export const WORDS: Record<
     reset: Record<Cause, string>
     compact: string
     toast: (left: string, t: string) => string
+    rebuilt: (t: string, cause: Cause) => string
   }
 > = {
   ru: {
@@ -187,6 +188,8 @@ export const WORDS: Record<
     reset: { model: 'сброс: модель', effort: 'сброс: усилие', other: 'сброс' },
     compact: '/compact',
     toast: (left, t) => `кэш остынет через ${left}: любое сообщение продлит его (${t} токенов)`,
+    rebuilt: (t, cause) =>
+      `кэш записан заново (${t} токенов): ${cause === 'model' ? 'модель сменилась сама' : 'причина не видна: быстрый режим, инструменты или сервер'}`,
   },
   en: {
     cache: 'cache',
@@ -197,8 +200,25 @@ export const WORDS: Record<
     reset: { model: 'rebuilt: model', effort: 'rebuilt: effort', other: 'rebuilt' },
     compact: '/compact',
     toast: (left, t) => `cache expires in ${left}: any message refreshes it (${t} tokens)`,
+    rebuilt: (t, cause) =>
+      `cache written again (${t} tokens): ${cause === 'model' ? 'the model changed on its own' : 'no visible cause: fast mode, tools or the server'}`,
   },
 }
+
+/**
+ * The smallest prompt a desktop notification is worth, from the `notify`
+ * option: 100k by default, any size, or none.
+ */
+export const notifyMin = (option: unknown): number | undefined =>
+  option === 'off' ? undefined : option === 'all' ? 0 : 100_000
+
+/**
+ * A rebuild worth a notification is one nobody asked for: a model the engine
+ * changed by itself (a fallback, a skill's model) or no visible cause. A
+ * /model switch and an effort change were the person's own doing.
+ */
+export const notifyRebuild = (cause: Cause, switchedByUser: boolean) =>
+  cause === 'other' || (cause === 'model' && !switchedByUser)
 
 export const langOf = (option: unknown, envLang: string | undefined): Lang =>
   option === 'ru' || option === 'en' ? option : envLang?.toLowerCase().startsWith('ru') ? 'ru' : 'en'

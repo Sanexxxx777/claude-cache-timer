@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { accountOf, decideTtl, fitBar, fmtLeft, fmtTokens, keepObserved, langOf, missCause, observeTtl, STAGE_COLOR, stageOf } from '../hooks/cache.ts'
+import { accountOf, decideTtl, fitBar, fmtLeft, fmtTokens, keepObserved, langOf, missCause, notifyMin, notifyRebuild, observeTtl, STAGE_COLOR, stageOf } from '../hooks/cache.ts'
 import type { Sample } from '../hooks/cache.ts'
 
 const MIN = 60_000
@@ -115,7 +115,7 @@ describe('rebuilds the countdown did not predict', () => {
 })
 
 // The module end to end: a main-loop request draws the timer, a subagent's does not.
-function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string; percentUsed: number }[], u = { read: 80_000, write: 1_000 }) {
+function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string; percentUsed: number }[], u = { read: 80_000, write: 1_000 }, runs: (readonly string[])[] = []) {
   on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: limits } }) as never)
   on('session.start', async ($, e) => ({ cwd: e.cwd }) as never)
   on('session.end', async () => ({ sessionId: 's1' }) as never)
@@ -126,6 +126,10 @@ function fakeEngine(on: On, env: Record<string, string>, limits: { kind: string;
   on('ui.log', () => ({ value: undefined }))
   on('classic.PostModelSwitch', () => ({}) as never)
   on('classic.PostCompact', () => ({}) as never)
+  on('process.run', ($, e) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
   // the engine's own band: nothing
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
@@ -336,5 +340,136 @@ describe('a model switch, a rebuild, a compaction', () => {
     const ui = await mountHint($)
     expect(await ui.findAll({ type: 'Text' })).toEqual([])
     await ui.unmount()
+  })
+})
+
+describe('a notification through Ghostty', () => {
+  test('the size it starts from, and which rebuilds are worth one', () => {
+    expect(notifyMin(undefined)).toBe(100_000)
+    expect(notifyMin('100k')).toBe(100_000)
+    expect(notifyMin('all')).toBe(0)
+    expect(notifyMin('off')).toBe(undefined)
+    expect(notifyRebuild('other', false)).toBe(true)
+    expect(notifyRebuild('model', false)).toBe(true)
+    expect(notifyRebuild('model', true)).toBe(false)
+    expect(notifyRebuild('effort', false)).toBe(false)
+  })
+
+  const GHOSTTY = { TERM_PROGRAM: 'ghostty', HOME: '/home/t' }
+  const SCRIPT = '/home/t/.claude/hooks/cache-notify.sh'
+  // the notifier is fired and forgotten: let its dispatch reach the engine
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+  }
+  // a 151k prompt, then a request that wrote 121k of it again
+  async function bigRebuild($: Engine, u: { read: number; write: number }, over: { model?: string } = {}) {
+    u.read = 150_000
+    u.write = 1_000
+    await step($, { turnId: 't1' })
+    u.read = 30_000
+    u.write = 121_000
+    await step($, { turnId: 't2', ...over })
+    await settle()
+  }
+
+  test('a big rebuild with no visible cause runs the notifier with the folder and the reason', { options: { lang: 'ru' } }, async ($, on) => {
+    const u = { read: 0, write: 0 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/Users/x/kalshi-bots', surface: 'terminal', isInteractive: true } as never)
+    await bigRebuild($, u)
+    expect(runs).toEqual([['bash', SCRIPT, 'Claude Code · kalshi-bots', 'кэш записан заново (151k токенов): причина не видна: быстрый режим, инструменты или сервер']])
+  })
+
+  test('a model the engine changed by itself is worth one', { options: { lang: 'ru' } }, async ($, on) => {
+    const u = { read: 0, write: 0 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await bigRebuild($, u, { model: 'claude-opus-5' })
+    expect(runs.map(r => r[3])).toEqual(['кэш записан заново (151k токенов): модель сменилась сама'])
+  })
+
+  test('a /model switch of yours stays quiet', async ($, on) => {
+    const u = { read: 150_000, write: 1_000 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($, { turnId: 't1' })
+    await $.classic.PostModelSwitch({ from_model: 'claude-opus-5-5', to_model: 'claude-fable-5-1', requested_model: 'fable', prompt_cache_warm: true } as never)
+    u.read = 0
+    u.write = 151_000
+    await step($, { turnId: 't2', model: 'claude-fable-5-1' })
+    await settle()
+    expect(runs).toEqual([])
+  })
+
+  test('a /model switch made while a turn runs stays quiet too', async ($, on) => {
+    const u = { read: 150_000, write: 1_000 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($, { turnId: 't1' })
+    await $.classic.PostModelSwitch({ from_model: 'claude-opus-5-5', to_model: 'claude-fable-5-1', requested_model: 'fable', prompt_cache_warm: true } as never)
+    // the request already in flight comes back on the old model
+    await step($, { turnId: 't1' })
+    u.read = 0
+    u.write = 151_000
+    await step($, { turnId: 't1', model: 'claude-fable-5-1' })
+    await settle()
+    expect(runs).toEqual([])
+  })
+
+  test('below 100k it stays quiet; with notify "all" it does not', { options: { notify: 'all' } }, async ($, on) => {
+    const u = { read: 80_000, write: 1_000 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($, { turnId: 't1' })
+    u.read = 20_000
+    u.write = 61_000
+    await step($, { turnId: 't2' })
+    await settle()
+    expect(runs.length).toBe(1)
+  })
+
+  test('the default 100k keeps an 81k rebuild quiet', async ($, on) => {
+    const u = { read: 80_000, write: 1_000 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await step($, { turnId: 't1' })
+    u.read = 20_000
+    u.write = 61_000
+    await step($, { turnId: 't2' })
+    await settle()
+    expect(runs).toEqual([])
+  })
+
+  test('another terminal, the desktop and notify "off" never run it', { options: { notify: 'off' } }, async ($, on) => {
+    const u = { read: 0, write: 0 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await bigRebuild($, u)
+    expect(runs).toEqual([])
+  })
+
+  test('outside Ghostty nothing runs', async ($, on) => {
+    const u = { read: 0, write: 0 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, { TERM_PROGRAM: 'iTerm.app', HOME: '/home/t' }, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+    await bigRebuild($, u)
+    expect(runs).toEqual([])
+  })
+
+  test('on the desktop nothing runs', async ($, on) => {
+    const u = { read: 0, write: 0 }
+    const runs: (readonly string[])[] = []
+    fakeEngine(on, GHOSTTY, SUBSCRIPTION, u, runs)
+    await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+    await bigRebuild($, u)
+    expect(runs).toEqual([])
   })
 })

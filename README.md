@@ -32,6 +32,24 @@ The countdown assumes the next request reads what the last one cached. Some chan
 
 Claude Code works out the likely cause of a miss itself, for `/usage` and status line scripts (`prompt_cache.last_miss_cause`), but it does not pass it to mods, so the mod reads it from the token counts and the events it can see.
 
+## A notification in Ghostty
+
+In [Ghostty](https://ghostty.org) on macOS, a big cache also raises a desktop notification, so a session in a background tab is not missed:
+
+- 2 minutes before it expires (10 seconds on a 5-minute cache), the same moment as the toast: `cache expires in 0:10: any message refreshes it (170k tokens)`;
+- when it is written again and nobody asked for that: the engine changed the model by itself, or the cause is out of sight. Your own `/model` switch and an effort change stay quiet.
+
+By default only prompts of 100k tokens or more raise one; the `notify` option changes that. Other terminals and the desktop app get none, and Ghostty may hold one back while you are looking at that window.
+
+The mod passes the text to a small script that finds the session's terminal and writes the OSC 777 sequence Ghostty turns into a notification. Put the script where the mod looks for it:
+
+```sh
+mkdir -p ~/.claude/hooks
+cp ~/claude-cache-timer/scripts/cache-notify.sh ~/.claude/hooks/
+```
+
+Without it nothing is sent. If no banner shows up, open System Settings → Notifications → Ghostty: notifications can be allowed there with the Desktop box unticked.
+
 ## Install
 
 Tested on Claude Code 2.1.289 and 2.1.290. Mods are early access, and their `$` API may change between releases.
@@ -67,18 +85,20 @@ Set them in `~/.claude/settings.json`:
 | `lang` | `auto` reads `LANG` (`ru_*` gives Russian), or `ru` / `en` | `auto` |
 | `ttl` | `auto`, or pin `5m` / `1h` | `auto` |
 | `toast` | one toast when the last stage starts, for prompts of 20k tokens or more | `true` |
+| `notify` | the Ghostty notification: for prompts of `100k` tokens or more, `all`, or `off` | `100k` |
 
 ## What it touches
 
-Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache), `classic.PostModelSwitch` (which model the next request goes to), `classic.PostCompact`, and `ui.render` on `PromptHint` (terminal) and `SessionMode` (desktop). It reads `HOME`, `LANG` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls, writes no files and starts no processes. `claude plugin validate .` prints the same list.
+Hooks: `session.start`, `session.end`, `turn.step` (main-loop requests only, subagents have their own cache), `classic.PostModelSwitch` (which model the next request goes to), `classic.PostCompact`, and `ui.render` on `PromptHint` (terminal) and `SessionMode` (desktop). It reads `HOME`, `LANG`, `TERM_PROGRAM` and the three cache variables above, plus `promptCacheTtl` from your settings files. It makes no network calls and writes no files. The one process it starts is the notification script, and only in Ghostty: `bash ~/.claude/hooks/cache-notify.sh <title> <body>`, which writes one escape sequence to the session's terminal and nothing else. `claude plugin validate .` prints the same list.
 
 ## Tests
 
 ```sh
 claude plugin test .
+bash tests/cache-notify-test.sh
 ```
 
-28 tests: colour stages for both lifetimes, time format, lifetime rules, when a rebuild counts and what caused it, how the line fits a narrow terminal, and the line itself on the terminal and desktop surfaces, with a model switch, a rebuild and a compaction.
+38 tests: colour stages for both lifetimes, time format, lifetime rules, when a rebuild counts and what caused it, how the line fits a narrow terminal, the line itself on the terminal and desktop surfaces, with a model switch, a rebuild and a compaction, and which rebuilds raise a Ghostty notification, from what size, never outside Ghostty or on the desktop. The script test writes to a temp file instead of a terminal: the sequence, its sanitising, silence outside Ghostty, exit 0 when it cannot write.
 
 ## Credits
 
